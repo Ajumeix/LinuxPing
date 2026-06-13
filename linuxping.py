@@ -1071,6 +1071,7 @@ class VmPingApp:
         # Save only settings/profiles. Do not autosave the current host panels.
         real_cfg = dict(self.cfg)
         real_cfg["log_dir"] = str(self.base_log_dir)
+        real_cfg["cols"] = self._normalize_cols()
         real_cfg["default_hosts"] = []
         save_config(real_cfg)
         self.root.destroy()
@@ -1317,18 +1318,57 @@ class VmPingApp:
         else:
             self.canvas.yview_scroll(-1 * (e.delta // 120), "units")
 
-    def _retile(self):
+    def _normalize_cols(self, value=None):
+        """Return a safe column count and keep the column selector valid."""
+        if value is None:
+            value = self.cols_var.get()
         try:
-            cols = int(self.cols_var.get())
-        except ValueError:
-            cols = 2
+            cols = int(value)
+        except (TypeError, ValueError):
+            cols = int(DEFAULT_CONFIG.get("cols", 2))
+
+        # The toolbar only supports 1-4 columns, so clamp anything loaded
+        # from Settings/config to that same range.
+        cols = max(1, min(4, cols))
+
+        if hasattr(self, "cols_var") and self.cols_var.get() != str(cols):
+            self.cols_var.set(str(cols))
+        return cols
+
+    def _retile(self):
+        cols = self._normalize_cols()
+
+        # Persist toolbar column changes immediately in runtime config.
+        # Without this, changing columns from the top bar can be lost on close.
+        self.cfg["cols"] = cols
+
+        # Capture the existing grid size before clearing. Tk keeps old column
+        # weights/uniform groups even after grid_forget(), which is why moving
+        # from 4 columns back to 2/1 can visually keep the old 4-column layout.
+        old_cols, old_rows = self.panel_frame.grid_size()
+
         for widget in self.panel_frame.winfo_children():
             widget.grid_forget()
+
+        # Fully reset previous columns and rows before applying the new layout.
+        reset_cols = max(old_cols, 4, len(self.panels), cols)
+        reset_rows = max(old_rows, (len(self.panels) // max(cols, 1)) + 2)
+        for col in range(reset_cols):
+            self.panel_frame.columnconfigure(col, weight=0, uniform="", minsize=0)
+        for row in range(reset_rows):
+            self.panel_frame.rowconfigure(row, weight=0, minsize=0)
+
         for col in range(cols):
-            self.panel_frame.columnconfigure(col, weight=1, uniform="col")
+            self.panel_frame.columnconfigure(col, weight=1, uniform="panel_col")
+
         for idx, p in enumerate(self.panels):
             p.frame.grid(row=idx // cols, column=idx % cols,
                          sticky="nsew", padx=3, pady=3)
+
+        try:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except Exception:
+            pass
 
     def _add_panel(self, host, mode):
         p = PingPanel(self.panel_frame, host, mode, self,
@@ -1475,7 +1515,12 @@ class VmPingApp:
         self.base_log_dir = Path(new_cfg.get("log_dir", str(LOG_DIR)))
         self.cfg = new_cfg
         self.cfg["log_dir"] = str(self.session_temp_dir / "per_target")
-        self.cols_var.set(str(new_cfg.get("cols", 2)))
+
+        cols = self._normalize_cols(new_cfg.get("cols", 2))
+        self.cfg["cols"] = cols
+        self.cols_var.set(str(cols))
+        self._retile()
+
         # Update cfg reference in all panels while keeping logs in the temporary test folder.
         for p in self.panels:
             p.cfg = self.cfg
